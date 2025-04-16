@@ -8,7 +8,7 @@
       "n_ff_piers": 0
     }
   },
-  "poly_simpl_tolerance": 0.001,
+  "poly_simpl_tolerance": 0.000,
   "prng_seed": 0,
   "n_samples": 5000,
   "ls_frac": 0.2
