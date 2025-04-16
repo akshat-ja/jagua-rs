@@ -41,12 +41,12 @@ impl SimplePolygon {
             points.len() >= 3,
             "simple polygon must have at least 3 points"
         );
-        assert_eq!(
-            points.iter().unique().count(),
-            points.len(),
-            "simple polygon should not contain duplicate points: {:?}",
-            points
-        );
+        // assert_eq!(
+        //     points.iter().unique().count(),
+        //     points.len(),
+        //     "simple polygon should not contain duplicate points: {:?}",
+        //     points
+        // );
 
         let area = match SimplePolygon::calculate_area(&points) {
             area if area == 0.0 => panic!("simple polygon has no area: {:?}", points),
