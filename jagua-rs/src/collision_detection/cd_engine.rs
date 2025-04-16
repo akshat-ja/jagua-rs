@@ -1,28 +1,28 @@
-use crate::collision_detection::hazard::Hazard;
-use crate::collision_detection::hazard::HazardEntity;
-use crate::collision_detection::hazard_helpers::{DetectionMap, HazardDetector};
+use crate::collision_detection::hazards::Hazard;
+use crate::collision_detection::hazards::HazardEntity;
+use crate::collision_detection::hazards::detector::HazardDetector;
+use crate::collision_detection::hazards::filter::HazardFilter;
 use crate::collision_detection::hpg::grid::Grid;
 use crate::collision_detection::hpg::hazard_proximity_grid::{DirtyState, HazardProximityGrid};
 use crate::collision_detection::hpg::hpg_cell::HPGCell;
-use crate::collision_detection::quadtree::qt_node::QTNode;
+use crate::collision_detection::quadtree::QTNode;
 use crate::fsize;
-use crate::geometry::fail_fast::sp_surrogate::SPSurrogate;
+use crate::geometry::Transformation;
+use crate::geometry::fail_fast::SPSurrogate;
 use crate::geometry::geo_enums::{GeoPosition, GeoRelation};
 use crate::geometry::geo_traits::{CollidesWith, Shape, Transformable, TransformableFrom};
-use crate::geometry::primitives::aa_rectangle::AARectangle;
-use crate::geometry::primitives::circle::Circle;
-use crate::geometry::primitives::edge::Edge;
-use crate::geometry::primitives::point::Point;
-use crate::geometry::primitives::simple_polygon::SimplePolygon;
-use crate::geometry::transformation::Transformation;
+use crate::geometry::primitives::AARectangle;
+use crate::geometry::primitives::Circle;
+use crate::geometry::primitives::Edge;
+use crate::geometry::primitives::Point;
+use crate::geometry::primitives::SimplePolygon;
+use crate::util::CDEConfig;
 use crate::util::assertions;
-use crate::util::config::CDEConfig;
 use itertools::Itertools;
 use tribool::Tribool;
 
 /// The Collision Detection Engine (CDE).
-/// The CDE can resolve a range of collision queries
-/// and update its state by registering and deregistering hazards.
+/// [`Hazard`]s can be (de)registered and collision queries can be performed.
 #[derive(Clone, Debug)]
 pub struct CDEngine {
     pub quadtree: QTNode,
@@ -34,8 +34,7 @@ pub struct CDEngine {
     pub uncommitted_deregisters: Vec<Hazard>,
 }
 
-/// Snapshot of the state of [CDEngine] at a given time.
-/// The [CDEngine] can take snapshots of itself at any time, and use them to restore to that state later.
+/// Snapshot of the state of [`CDEngine`]. Can be used to restore to a previous state.
 #[derive(Clone, Debug)]
 pub struct CDESnapshot {
     dynamic_hazards: Vec<Hazard>,
@@ -285,21 +284,21 @@ impl CDEngine {
     /// * `reference_shape` - The shape to be checked for collisions
     /// * `transform` - The transformation to be applied to the reference shape
     /// * `buffer_shape` - A temporary storage for the transformed shape
-    /// * `irrelevant_hazards` - entities to be ignored during the check
+    /// * `filter` - Hazard filter to be applied
     pub fn surrogate_or_poly_collides(
         &self,
         reference_shape: &SimplePolygon,
         transform: &Transformation,
         buffer_shape: &mut SimplePolygon,
-        irrelevant_hazards: &[HazardEntity],
+        filter: &impl HazardFilter,
     ) -> bool {
         //Begin with checking the surrogate for collisions
-        match self.surrogate_collides(reference_shape.surrogate(), transform, irrelevant_hazards) {
+        match self.surrogate_collides(reference_shape.surrogate(), transform, filter) {
             true => true,
             false => {
                 //Transform the reference_shape and store the result in the buffer_shape
                 buffer_shape.transform_from(reference_shape, transform);
-                self.poly_collides(buffer_shape, irrelevant_hazards)
+                self.poly_collides(buffer_shape, filter)
             }
         }
     }
@@ -307,18 +306,14 @@ impl CDEngine {
     ///Checks whether a simple polygon collides with any of the (relevant) hazards
     /// # Arguments
     /// * `shape` - The shape (already transformed) to be checked for collisions
-    /// * `irrelevant_hazards` - entities to be ignored during the check
-    pub fn poly_collides(
-        &self,
-        shape: &SimplePolygon,
-        irrelevant_hazards: &[HazardEntity],
-    ) -> bool {
+    /// * `filter` - Hazard filter to be applied
+    pub fn poly_collides(&self, shape: &SimplePolygon, filter: &impl HazardFilter) -> bool {
         match self.bbox.relation_to(&shape.bbox()) {
             //Not fully inside bbox => definite collision
             GeoRelation::Disjoint | GeoRelation::Enclosed | GeoRelation::Intersecting => true,
             GeoRelation::Surrounding => {
-                self.poly_collides_by_edge_intersection(shape, irrelevant_hazards)
-                    || self.poly_collides_by_containment(shape, irrelevant_hazards)
+                self.poly_collides_by_edge_intersection(shape, filter)
+                    || self.poly_collides_by_containment(shape, filter)
             }
         }
     }
@@ -327,30 +322,22 @@ impl CDEngine {
     /// # Arguments
     /// * `base_surrogate` - The (untransformed) surrogate to be checked for collisions
     /// * `transform` - The transformation to be applied to the surrogate
-    /// * `irrelevant_hazards` - entities to be ignored during the check
+    /// * `filter` - Hazard filter to be applied
     pub fn surrogate_collides(
         &self,
         base_surrogate: &SPSurrogate,
         transform: &Transformation,
-        irrelevant_hazards: &[HazardEntity],
+        filter: &impl HazardFilter,
     ) -> bool {
         for pole in base_surrogate.ff_poles() {
             let t_pole = pole.transform_clone(transform);
-            if self
-                .quadtree
-                .collides(&t_pole, irrelevant_hazards)
-                .is_some()
-            {
+            if self.quadtree.collides(&t_pole, filter).is_some() {
                 return true;
             }
         }
         for pier in base_surrogate.ff_piers() {
             let t_pier = pier.transform_clone(transform);
-            if self
-                .quadtree
-                .collides(&t_pier, irrelevant_hazards)
-                .is_some()
-            {
+            if self.quadtree.collides(&t_pier, filter).is_some() {
                 return true;
             }
         }
@@ -368,14 +355,10 @@ impl CDEngine {
 
     /// Checks whether an edge definitely collides with any of the (relevant) hazards.
     /// Only fully hazardous nodes in the quadtree are considered.
-    pub fn edge_definitely_collides(
-        &self,
-        edge: &Edge,
-        irrelevant_hazards: &[HazardEntity],
-    ) -> Tribool {
+    pub fn edge_definitely_collides(&self, edge: &Edge, filter: &impl HazardFilter) -> Tribool {
         match !self.bbox.collides_with(&edge.start) || !self.bbox.collides_with(&edge.end) {
             true => Tribool::True, //if either the start or end of the edge is outside the quadtree, it definitely collides
-            false => self.quadtree.definitely_collides(edge, irrelevant_hazards),
+            false => self.quadtree.definitely_collides(edge, filter),
         }
     }
 
@@ -384,34 +367,32 @@ impl CDEngine {
     pub fn circle_definitely_collides(
         &self,
         circle: &Circle,
-        irrelevant_hazards: &[HazardEntity],
+        filter: &impl HazardFilter,
     ) -> Tribool {
         match self.bbox.collides_with(&circle.center) {
             false => Tribool::True, //outside the quadtree, so definitely collides
-            true => self
-                .quadtree
-                .definitely_collides(circle, irrelevant_hazards),
+            true => self.quadtree.definitely_collides(circle, filter),
         }
     }
 
     fn poly_collides_by_edge_intersection(
         &self,
         shape: &SimplePolygon,
-        irrelevant_hazards: &[HazardEntity],
+        filter: &impl HazardFilter,
     ) -> bool {
         shape
             .edge_iter()
-            .any(|e| self.quadtree.collides(&e, irrelevant_hazards).is_some())
+            .any(|e| self.quadtree.collides(&e, filter).is_some())
     }
 
     fn poly_collides_by_containment(
         &self,
         shape: &SimplePolygon,
-        irrelevant_hazards: &[HazardEntity],
+        filter: &impl HazardFilter,
     ) -> bool {
         //collect all active and non-ignored hazards
         self.all_hazards()
-            .filter(|h| h.active && !irrelevant_hazards.contains(&h.entity))
+            .filter(|h| h.active && !filter.is_irrelevant(&h.entity))
             .any(|haz| self.poly_or_hazard_are_contained(shape, haz))
     }
 
@@ -453,31 +434,12 @@ impl CDEngine {
         }
     }
 
-    /// Collects all hazards with which the polygon collides.
-    /// Any hazards in `irrelevant_hazards` are ignored.
+    /// Collects all hazards with which the polygon collides and reports them to the detector.
     pub fn collect_poly_collisions(
         &self,
         shape: &SimplePolygon,
-        irrelevant_hazards: &[HazardEntity],
-    ) -> DetectionMap {
-        let mut detection_map = DetectionMap::new();
-        self.collect_poly_collisions_in_detector(shape, irrelevant_hazards, &mut detection_map);
-        detection_map
-    }
-
-    /// Collects all hazards with which the polygon collides and stores them in the detector.
-    /// Any hazards in `irrelevant_hazards` are ignored, as well as hazards present in the detector before the call.
-    pub fn collect_poly_collisions_in_detector(
-        &self,
-        shape: &SimplePolygon,
-        irrelevant_hazards: &[HazardEntity],
         detector: &mut impl HazardDetector,
     ) {
-        //temporarily add the irrelevant hazards to the detector
-        irrelevant_hazards
-            .iter()
-            .for_each(|i_haz| detector.push(i_haz.clone()));
-
         if self.bbox.relation_to(&shape.bbox()) != GeoRelation::Surrounding {
             detector.push(HazardEntity::BinExterior)
         }
@@ -493,45 +455,15 @@ impl CDEngine {
                 detector.push(h.entity);
             }
         });
-
-        //drain the irrelevant hazards, leaving only the colliding entities
-        irrelevant_hazards
-            .iter()
-            .for_each(|i_haz| detector.remove(i_haz));
     }
 
-    /// Collects all hazards with which the surrogate collides.
-    /// Any hazards in `irrelevant_hazards` are ignored.
+    /// Collects all hazards with which the surrogate collides and reports them to the detector.
     pub fn collect_surrogate_collisions(
         &self,
         base_surrogate: &SPSurrogate,
         transform: &Transformation,
-        irrelevant_hazards: &[HazardEntity],
-    ) -> DetectionMap {
-        let mut detection_map = DetectionMap::new();
-        self.collect_surrogate_collisions_in_detector(
-            base_surrogate,
-            transform,
-            irrelevant_hazards,
-            &mut detection_map,
-        );
-        detection_map
-    }
-
-    /// Collects all hazards with which the surrogate collides and stores them in the detector.
-    /// Any hazards in `irrelevant_hazards` are ignored, as well as hazards present in the detector before the call.
-    pub fn collect_surrogate_collisions_in_detector(
-        &self,
-        base_surrogate: &SPSurrogate,
-        transform: &Transformation,
-        irrelevant_hazards: &[HazardEntity],
         detector: &mut impl HazardDetector,
     ) {
-        //temporarily add the irrelevant hazards to the buffer
-        irrelevant_hazards
-            .iter()
-            .for_each(|i_haz| detector.push(i_haz.clone()));
-
         for pole in base_surrogate.ff_poles() {
             let t_pole = pole.transform_clone(transform);
             self.quadtree.collect_collisions(&t_pole, detector)
@@ -540,15 +472,10 @@ impl CDEngine {
             let t_pier = pier.transform_clone(transform);
             self.quadtree.collect_collisions(&t_pier, detector);
         }
-
-        //drain the irrelevant hazards, leaving only the colliding entities
-        irrelevant_hazards
-            .iter()
-            .for_each(|i_haz| detector.remove(i_haz));
     }
 
     /// Collects all hazards potentially colliding with the given bounding box.
-    /// This is an overestimation, as it's limited by the quadtree resolution.
+    /// This is an overestimation, as it is limited by the quadtree resolution.
     pub fn collect_potential_hazards_within(
         &self,
         bbox: &AARectangle,
