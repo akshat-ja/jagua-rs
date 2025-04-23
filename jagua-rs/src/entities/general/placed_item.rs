@@ -2,7 +2,7 @@ use crate::collision_detection::hazards::filter::QZHazardFilter;
 use crate::entities::general::Item;
 use crate::geometry::DTransformation;
 use crate::geometry::geo_traits::Transformable;
-use crate::geometry::primitives::SimplePolygon;
+use crate::geometry::primitives::SPolygon;
 use slotmap::new_key_type;
 use std::sync::Arc;
 
@@ -24,13 +24,13 @@ pub struct PlacedItem {
     /// The filter for hazards that the `Item` is unaffected by
     pub hazard_filter: Option<QZHazardFilter>,
     /// The shape of the `Item` after it has been transformed and placed in a `Layout`
-    pub shape: Arc<SimplePolygon>,
+    pub shape: Arc<SPolygon>,
 }
 
 impl PlacedItem {
     pub fn new(item: &Item, d_transf: DTransformation) -> Self {
         let transf = d_transf.compose();
-        let shape = Arc::new(item.shape.transform_clone(&transf));
+        let shape = Arc::new(item.shape_cd.transform_clone(&transf));
         let qz_haz_filter = item.hazard_filter.clone();
 
         PlacedItem {

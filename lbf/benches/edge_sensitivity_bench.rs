@@ -1,25 +1,24 @@
-use std::fs::File;
-use std::io::BufReader;
-use std::path::Path;
-
 use crate::util::{N_ITEMS_REMOVED, SWIM_PATH};
 use criterion::measurement::WallTime;
 use criterion::{BenchmarkGroup, BenchmarkId, Criterion, criterion_group, criterion_main};
 use itertools::Itertools;
 use jagua_rs::collision_detection::hazards::filter::NoHazardFilter;
-use jagua_rs::entities::general::{Instance, Item};
+use jagua_rs::entities::general::Instance;
 use jagua_rs::entities::strip_packing::SPInstance;
-use jagua_rs::fsize;
 use jagua_rs::geometry::geo_traits::{Shape, TransformableFrom};
 use jagua_rs::geometry::primitives::Point;
-use jagua_rs::geometry::primitives::SimplePolygon;
+use jagua_rs::geometry::primitives::SPolygon;
 use jagua_rs::io::json_instance::JsonInstance;
 use lbf::config::LBFConfig;
 use lbf::io;
 use lbf::io::svg_util::SvgDrawOptions;
-use lbf::samplers::hpg_sampler::HPGSampler;
+use lbf::samplers::uniform_rect_sampler::UniformRectSampler;
 use rand::SeedableRng;
 use rand::prelude::SmallRng;
+use std::fs::File;
+use std::io::BufReader;
+use std::path::Path;
+use std::sync::Arc;
 
 criterion_main!(benches);
 criterion_group!(
@@ -61,7 +60,7 @@ fn edge_sensitivity_bench(config: LBFConfig, mut g: BenchmarkGroup<WallTime>) {
                 config.cde_config,
                 config.poly_simpl_tolerance,
             );
-            modify_instance(instance, edge_multiplier as usize, config)
+            modify_instance(instance, edge_multiplier as usize)
         };
 
         let (problem, selected_pi_uids) =
@@ -91,10 +90,9 @@ fn edge_sensitivity_bench(config: LBFConfig, mut g: BenchmarkGroup<WallTime>) {
         };*/
 
         let samples = {
-            let mut hpg_sampler = HPGSampler::new(instance.item(0), layout.cde())
-                .expect("should be able to create HPGSampler");
+            let sampler = UniformRectSampler::new(layout.cde().bbox(), instance.item(0));
             (0..N_TOTAL_SAMPLES)
-                .map(|_| hpg_sampler.sample(&mut rng))
+                .map(|_| sampler.sample(&mut rng))
                 .collect_vec()
         };
 
@@ -108,17 +106,17 @@ fn edge_sensitivity_bench(config: LBFConfig, mut g: BenchmarkGroup<WallTime>) {
                 for i in 0..N_ITEMS_REMOVED {
                     let pi_uid = &selected_pi_uids[i];
                     let item = instance.item(pi_uid.item_id);
-                    let mut buffer_shape = item.shape.as_ref().clone();
+                    let mut buffer_shape = item.shape_cd.as_ref().clone();
                     for dtransf in samples_cycler.next().unwrap() {
                         let transf = dtransf.compose();
                         let collides = match layout.cde().surrogate_collides(
-                            item.shape.surrogate(),
+                            item.shape_cd.surrogate(),
                             &transf,
                             &NoHazardFilter,
                         ) {
                             true => true,
                             false => {
-                                buffer_shape.transform_from(&item.shape, &transf);
+                                buffer_shape.transform_from(&item.shape_cd, &transf);
                                 layout.cde().poly_collides(&buffer_shape, &NoHazardFilter)
                             }
                         };
@@ -132,41 +130,34 @@ fn edge_sensitivity_bench(config: LBFConfig, mut g: BenchmarkGroup<WallTime>) {
         });
         println!(
             "{:.3}% valid",
-            n_valid as fsize / (n_invalid + n_valid) as fsize * 100.0
+            n_valid as f32 / (n_invalid + n_valid) as f32 * 100.0
         );
     }
     g.finish();
 }
 
-fn modify_instance(mut instance: SPInstance, multiplier: usize, config: LBFConfig) -> SPInstance {
+fn modify_instance(mut instance: SPInstance, multiplier: usize) -> SPInstance {
     instance.items.iter_mut().for_each(|(item, _)| {
-        *item = Item::new(
-            item.id,
-            multiply_edge_count(&item.shape, multiplier),
-            item.allowed_rotation.clone(),
-            item.base_quality,
-            item.value,
-            item.pretransform.clone(),
-            config.cde_config.item_surrogate_config,
-        );
+        let multiplied_shape = multiply_edge_count(&item.shape_cd, multiplier);
+        item.shape_cd = Arc::new(multiplied_shape);
     });
     instance
 }
 
-fn multiply_edge_count(shape: &SimplePolygon, multiplier: usize) -> SimplePolygon {
+fn multiply_edge_count(shape: &SPolygon, multiplier: usize) -> SPolygon {
     let mut new_points = vec![];
 
     for edge in shape.edge_iter() {
         //split x and y into "times" parts
-        let x_step = (edge.end.0 - edge.start.0) / multiplier as fsize;
-        let y_step = (edge.end.1 - edge.start.1) / multiplier as fsize;
+        let x_step = (edge.end.0 - edge.start.0) / multiplier as f32;
+        let y_step = (edge.end.1 - edge.start.1) / multiplier as f32;
         let mut start = edge.start;
         for _ in 0..multiplier {
             new_points.push(start);
             start = Point(start.0 + x_step, start.1 + y_step);
         }
     }
-    let new_polygon = SimplePolygon::new(new_points);
+    let new_polygon = SPolygon::new(new_points);
     assert!(almost::equal(shape.area(), new_polygon.area()));
     new_polygon
 }

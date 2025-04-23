@@ -3,7 +3,6 @@ use crate::entities::bin_packing::BPSolution;
 use crate::entities::general::Instance;
 use crate::entities::general::Layout;
 use crate::entities::general::{PItemKey, PlacedItem};
-use crate::fsize;
 use crate::geometry::DTransformation;
 use crate::util::assertions;
 use itertools::Itertools;
@@ -101,7 +100,6 @@ impl BPProblem {
 
         let solution = BPSolution {
             layout_snapshots,
-            usage: self.usage(),
             placed_item_qtys: self.placed_item_qtys().collect(),
             target_item_qtys,
             bin_qtys: self.bin_qtys.clone(),
@@ -155,14 +153,16 @@ impl BPProblem {
         debug_assert!(assertions::bpproblem_matches_solution(self, solution));
     }
 
-    pub fn usage(&self) -> fsize {
-        let (total_bin_area, total_used_area) =
-            self.layouts.iter().fold((0.0, 0.0), |acc, (_, l)| {
-                let bin_area = l.bin.area;
-                let used_area = bin_area * l.usage();
-                (acc.0 + bin_area, acc.1 + used_area)
-            });
-        total_used_area / total_bin_area
+    pub fn density(&self) -> f32 {
+        let total_bin_area = self.layouts.values().map(|l| l.bin.area()).sum::<f32>();
+
+        let total_item_area = self
+            .layouts
+            .values()
+            .map(|l| l.placed_item_area(&self.instance))
+            .sum::<f32>();
+
+        total_item_area / total_bin_area
     }
 
     pub fn placed_item_qtys(&self) -> impl Iterator<Item = usize> {
@@ -205,11 +205,6 @@ impl BPProblem {
 
     fn deregister_included_item(&mut self, item_id: usize) {
         self.missing_item_qtys[item_id] += 1;
-    }
-
-    /// Makes sure that the all collision detection engines are completely updated with the changes made to the layouts.
-    pub fn flush_changes(&mut self) {
-        self.layouts.values_mut().for_each(|l| l.flush_changes());
     }
 }
 

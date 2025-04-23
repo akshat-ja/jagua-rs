@@ -43,19 +43,21 @@ position without causing any *collisions*.
   - [x] Can resolve millions of collision queries per second
   - [x] Integrated preprocessor to simplify polygons
 - **Robust:**
-  - [x] Designed to mimic the exact results of a naive trigonometric approach
-  - [x] Special care is taken to handle edge cases caused by floating-point arithmetic
   - [x] Written in pure Rust 🦀
+  - [x] Designed to mimic the exact results of a naive trigonometric approach
+  - [x] Insensitive to the number of edges in the polygons 
+  - [x] Special care is taken to handle edge cases caused by floating-point arithmetic
 - **Adaptable:**
-  - [x] Define custom C&P problem variants by creating new `Instance` and accompanying `Problem` implementations
+  - [x] Define custom C&P problem variants by creating new `Instance`, `Problem` and `Solution` implementations
   - [x] Add extra constraints by creating new `Hazards` and `HazardFilters`
-    - [x] `Hazards`: consolidation of all spatial constraints into a single model
+    - [x] `Hazards`: abstraction of all spatial constraints into a single model
     - [x] `HazardFilters`: excluding specific `Hazards` from consideration on a per-query basis
 - **Currently supports:**
   - [x] Bin- & strip-packing problems
   - [x] Irregular-shaped items & bins
-  - [x] Continuous rotation & translation (double precision)
-  - [x] Holes and quality zones in the bin
+  - [x] Continuous rotation & translation
+  - [x] Holes and inferior quality zones in the bin
+  - [x] Minimum separation distance between an item and any hazard
 
 ## `lbf` ↙️
 
@@ -144,7 +146,6 @@ The configuration file has the following structure:
 {
   "cde_config": { //Configuration of the collision detection engine
     "quadtree_depth": 5, //Maximum depth of the quadtree is 5
-    "hpg_n_cells": 2000, //The hazard proximity grid contains 2000 cells
     "item_surrogate_config": {
       "n_pole_limits": [[100, 0.0], [20, 0.75], [10, 0.90]], //See docs for details 
       "n_ff_poles": 2, //Two poles will be used for fail-fast collision detection
@@ -152,13 +153,14 @@ The configuration file has the following structure:
     }
   },
   "poly_simpl_tolerance": 0.001, //Polygons will be simplified until at most a 0.1% deviation in area from the original
+  "min_item_separation": 0.0, //Minimum distance between items and any hazard
   "prng_seed": 0, //Seed for the pseudo-random number generator. If undefined the outcome will be non-deterministic
   "n_samples": 5000, //5000 placement samples will be queried per item per layout
   "ls_frac": 0.2 //Of those 5000 samples, 80% will be sampled at uniformly at random, 20% will be local search samples
 }
 ```
 
-See [docs](https://jeroengar.github.io/jagua-rs-docs/lbf/lbf_config/struct.LBFConfig.html) for a detailed description of all available configuration options.
+See [docs](https://jeroengar.github.io/jagua-rs-docs/lbf/config/struct.LBFConfig.html) for a detailed description of all available configuration options.
 
 ### Important note
 

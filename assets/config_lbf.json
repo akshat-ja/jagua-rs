@@ -1,7 +1,6 @@
 {
   "cde_config": {
     "quadtree_depth": 5,
-    "hpg_n_cells": 2000,
     "item_surrogate_config": {
       "n_pole_limits": [[100, 0.0], [20, 0.75], [10, 0.90]],
       "n_ff_poles": 2,
@@ -9,7 +8,13 @@
     }
   },
   "poly_simpl_tolerance": 0.000,
+  "min_item_separation": 5.0,
   "prng_seed": 0,
   "n_samples": 5000,
-  "ls_frac": 0.2
+  "ls_frac": 0.2,
+  "svg_draw_options": {
+    "use_internal_shapes": false,
+    "quadtree": false,
+    "surrogate": false
+  }
 }

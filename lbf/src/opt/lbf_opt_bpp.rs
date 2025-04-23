@@ -1,7 +1,7 @@
 use std::time::Instant;
 
+use crate::ITEM_LIMIT;
 use crate::config::LBFConfig;
-use crate::opt::ITEM_LIMIT;
 use crate::opt::search::{item_placement_order, search};
 use jagua_rs::collision_detection::hazards::filter::NoHazardFilter;
 use jagua_rs::entities::bin_packing::{BPInstance, BPProblem, BPSolution};
@@ -81,13 +81,13 @@ impl LBFOptimizerBP {
         );
 
         info!(
-            "[LBF] solution contains {} items with a usage of {:.3}%",
+            "[LBF] solution contains {} items with a density of {:.3}%",
             solution
                 .layout_snapshots
                 .values()
                 .map(|ls| ls.placed_items.len())
                 .sum::<usize>(),
-            solution.usage * 100.0
+            solution.density(&self.instance) * 100.0
         );
         solution
     }

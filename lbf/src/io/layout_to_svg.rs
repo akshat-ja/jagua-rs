@@ -2,9 +2,8 @@ use crate::io::svg_util::SvgDrawOptions;
 use crate::io::{svg_export, svg_util};
 use jagua_rs::collision_detection::hazards::filter::NoHazardFilter;
 use jagua_rs::entities::general::{Instance, Layout, LayoutSnapshot};
-use jagua_rs::fsize;
-use jagua_rs::geometry::Transformation;
-use jagua_rs::geometry::primitives::Circle;
+use jagua_rs::geometry::geo_traits::{Shape, Transformable};
+use jagua_rs::geometry::{DTransformation, Transformation};
 use jagua_rs::io::parser;
 use svg::Document;
 use svg::node::element::{Definitions, Group, Title, Use};
@@ -23,53 +22,39 @@ pub fn layout_to_svg(
     instance: &dyn Instance,
     options: SvgDrawOptions,
 ) -> Document {
-    let internal_bin = &layout.bin;
-    let inv_bin_transf = internal_bin.pretransform.clone().inverse();
-    let bin = parser::pretransform_bin(internal_bin, &inv_bin_transf);
+    let bin = &layout.bin;
 
-    let vbox = bin.bbox().clone().scale(1.05);
+    let vbox = bin.outer_orig.bbox().clone().scale(1.05);
 
     let theme = &options.theme;
 
     let stroke_width =
-        fsize::min(vbox.width(), vbox.height()) * 0.001 * theme.stroke_width_multiplier;
+        f32::min(vbox.width(), vbox.height()) * 0.001 * theme.stroke_width_multiplier;
 
     //draw bin
     let bin_group = {
-        let mut bin_group = Group::new().set("id", format!("bin_{}", bin.id));
-        let bbox = bin.bbox();
+        let bin_group = Group::new().set("id", format!("bin_{}", bin.id));
+        let bbox = bin.outer_orig.bbox();
         let title = Title::new(format!(
             "bin, id: {}, bbox: [x_min: {:.3}, y_min: {:.3}, x_max: {:.3}, y_max: {:.3}]",
             bin.id, bbox.x_min, bbox.y_min, bbox.x_max, bbox.y_max
         ));
 
         //outer
-        bin_group = bin_group
+        bin_group
             .add(svg_export::data_to_path(
-                svg_export::simple_polygon_data(&bin.outer),
+                svg_export::original_shape_data(
+                    &bin.outer_orig,
+                    &bin.outer_cd,
+                    options.draw_cd_shapes,
+                ),
                 &[
                     ("fill", &*format!("{}", theme.bin_fill)),
                     ("stroke", "black"),
                     ("stroke-width", &*format!("{}", 2.0 * stroke_width)),
                 ],
             ))
-            .add(title);
-
-        //holes
-        for (hole_idx, hole) in bin.holes.iter().enumerate() {
-            bin_group = bin_group.add(
-                svg_export::data_to_path(
-                    svg_export::simple_polygon_data(hole),
-                    &[
-                        ("fill", &*format!("{}", theme.hole_fill)),
-                        ("stroke", "black"),
-                        ("stroke-width", &*format!("{}", 1.0 * stroke_width)),
-                    ],
-                )
-                .add(Title::new(format!("hole #{}", hole_idx))),
-            );
-        }
-        bin_group
+            .add(title)
     };
 
     let qz_group = {
@@ -79,10 +64,14 @@ pub fn layout_to_svg(
         for qz in bin.quality_zones.iter().rev().flatten() {
             let color = theme.qz_fill[qz.quality];
             let stroke_color = svg_util::change_brightness(color, 0.5);
-            for qz_shape in qz.zones.iter() {
+            for (orig_qz_shape, intern_qz_shape) in qz.shapes_orig.iter().zip(qz.shapes_cd.iter()) {
                 qz_group = qz_group.add(
                     svg_export::data_to_path(
-                        svg_export::simple_polygon_data(qz_shape),
+                        svg_export::original_shape_data(
+                            orig_qz_shape,
+                            intern_qz_shape,
+                            options.draw_cd_shapes,
+                        ),
                         &[
                             ("fill", &*format!("{}", color)),
                             ("fill-opacity", "0.50"),
@@ -106,19 +95,18 @@ pub fn layout_to_svg(
         //define all the items and their surrogates (if enabled)
         let mut item_defs = Definitions::new();
         let mut surrogate_defs = Definitions::new();
-        for (internal_item, _) in instance.items() {
-            let item = parser::pretransform_item(
-                internal_item,
-                &internal_item.pretransform.clone().inverse(),
-            );
-            let shape = item.shape.as_ref();
+        for (item, _) in instance.items() {
             let color = match item.base_quality {
                 None => theme.item_fill.to_owned(),
                 Some(q) => svg_util::blend_colors(theme.item_fill, theme.qz_fill[q]),
             };
             item_defs = item_defs.add(Group::new().set("id", format!("item_{}", item.id)).add(
                 svg_export::data_to_path(
-                    svg_export::simple_polygon_data(shape),
+                    svg_export::original_shape_data(
+                        &item.shape_orig,
+                        &item.shape_cd,
+                        options.draw_cd_shapes,
+                    ),
                     &[
                         ("fill", &*format!("{}", color)),
                         ("stroke-width", &*format!("{}", stroke_width)),
@@ -130,6 +118,15 @@ pub fn layout_to_svg(
             ));
 
             if options.surrogate {
+                let surr_transf = match options.draw_cd_shapes {
+                    true => Transformation::empty(), //surrogate is already in internal coordinates
+                    false => {
+                        // The original shape is drawn on the SVG, we need to inverse the pre-transform
+                        let pre_transform = item.shape_orig.pre_transform.compose();
+                        let inv_pre_transform = pre_transform.inverse();
+                        inv_pre_transform
+                    }
+                };
                 let mut surrogate_group = Group::new().set("id", format!("surrogate_{}", item.id));
                 let poi_style = [
                     ("fill", "black"),
@@ -154,24 +151,28 @@ pub fn layout_to_svg(
                     ("stroke-linejoin", "round"),
                 ];
 
-                let surrogate = item.shape.surrogate();
+                let surrogate = item.shape_cd.surrogate();
                 let poi = &surrogate.poles[0];
                 let ff_poles = surrogate.ff_poles();
 
                 for pole in surrogate.poles.iter() {
                     if pole == poi {
-                        surrogate_group = surrogate_group.add(svg_export::circle(pole, &poi_style));
-                    }
-                    if ff_poles.contains(pole) {
-                        surrogate_group = surrogate_group.add(svg_export::circle(pole, &ff_style));
+                        let svg_circle =
+                            svg_export::circle(pole.transform_clone(&surr_transf), &poi_style);
+                        surrogate_group = surrogate_group.add(svg_circle);
+                    } else if ff_poles.contains(pole) {
+                        let svg_circle =
+                            svg_export::circle(pole.transform_clone(&surr_transf), &ff_style);
+                        surrogate_group = surrogate_group.add(svg_circle);
                     } else {
-                        surrogate_group =
-                            surrogate_group.add(svg_export::circle(pole, &no_ff_style));
+                        let svg_circle =
+                            svg_export::circle(pole.transform_clone(&surr_transf), &no_ff_style);
+                        surrogate_group = surrogate_group.add(svg_circle);
                     }
                 }
                 for pier in &surrogate.piers {
                     surrogate_group = surrogate_group.add(svg_export::data_to_path(
-                        svg_export::edge_data(pier),
+                        svg_export::edge_data(pier.transform_clone(&surr_transf)),
                         &ff_style,
                     ));
                 }
@@ -182,18 +183,16 @@ pub fn layout_to_svg(
         let mut surrogate_group = Group::new().set("id", "surrogates").add(surrogate_defs);
 
         for pi in layout.placed_items().values() {
-            let abs_transf = parser::internal_to_absolute_transform(
-                &pi.d_transf,
-                &instance.item(pi.item_id).pretransform,
-                &internal_bin.pretransform,
-            );
-            let title = Title::new(format!(
-                "item, id: {}, transf: [{}]",
-                pi.item_id,
-                abs_transf.decompose()
-            ));
+            let dtransf = match options.draw_cd_shapes {
+                true => pi.d_transf,
+                false => {
+                    let item = instance.item(pi.item_id);
+                    parser::int_to_ext_transformation(&pi.d_transf, &item.shape_orig.pre_transform)
+                }
+            };
+            let title = Title::new(format!("item, id: {}, transf: [{}]", pi.item_id, dtransf));
             let pi_ref = Use::new()
-                .set("transform", transform_to_svg(&abs_transf))
+                .set("transform", transform_to_svg(dtransf))
                 .set("xlink:href", format!("#item_{}", pi.item_id))
                 .add(title);
 
@@ -201,7 +200,7 @@ pub fn layout_to_svg(
 
             if options.surrogate {
                 let pi_surr_ref = Use::new()
-                    .set("transform", transform_to_svg(&abs_transf))
+                    .set("transform", transform_to_svg(dtransf))
                     .set("xlink:href", format!("#surrogate_{}", pi.item_id));
 
                 surrogate_group = surrogate_group.add(pi_surr_ref);
@@ -220,7 +219,6 @@ pub fn layout_to_svg(
             let qt_data = svg_export::quad_tree_data(layout.cde().quadtree(), &NoHazardFilter);
             let qt_group = Group::new()
                 .set("id", "quadtree")
-                .set("transform", transform_to_svg(&inv_bin_transf))
                 .add(svg_export::data_to_path(
                     qt_data.0,
                     &[
@@ -254,36 +252,9 @@ pub fn layout_to_svg(
         }
     };
 
-    let hpg_group = match options.haz_prox_grid {
-        false => None,
-        true => {
-            let mut hpg_group = Group::new()
-                .set("id", "haz_prox_grid")
-                .set("transform", transform_to_svg(&inv_bin_transf));
-            let hpg = layout.cde().haz_prox_grid().unwrap();
-            for hp_cell in hpg.grid.cells.iter().flatten() {
-                let center = hp_cell.centroid;
-                let prox = hp_cell.hazard_proximity(None);
-                let color = if prox == 0.0 { "red" } else { "blue" };
-
-                hpg_group = hpg_group
-                    .add(svg_export::point(center, Some(color), Some(stroke_width)))
-                    .add(svg_export::circle(
-                        &Circle::new(center, prox),
-                        &[
-                            ("fill", "none"),
-                            ("stroke", color),
-                            ("stroke-width", &*format!("{}", stroke_width / 2.0)),
-                        ],
-                    ));
-            }
-            Some(hpg_group)
-        }
-    };
-
     let vbox_svg = (vbox.x_min, vbox.y_min, vbox.width(), vbox.height());
 
-    let optionals = [surrogate_group, qt_group, hpg_group]
+    let optionals = [surrogate_group, qt_group]
         .into_iter()
         .flatten()
         .fold(Group::new().set("id", "optionals"), |g, opt| g.add(opt));
@@ -297,10 +268,9 @@ pub fn layout_to_svg(
         .add(optionals)
 }
 
-fn transform_to_svg(t: &Transformation) -> String {
+fn transform_to_svg(dt: DTransformation) -> String {
     //https://developer.mozilla.org/en-US/docs/Web/SVG/Attribute/transform
     //operations are effectively applied from right to left
-    let dt = t.decompose();
     let (tx, ty) = dt.translation();
     let r = dt.rotation().to_degrees();
     format!("translate({tx} {ty}), rotate({r})")
